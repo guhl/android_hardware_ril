@@ -89,7 +89,7 @@ namespace android {
 #define PRINTBUF_SIZE 8096
 
 // Enable RILC log
-#define RILC_LOG 0
+#define RILC_LOG 1
 
 #if RILC_LOG
     #define startRequest           sprintf(printBuf, "(")
@@ -193,6 +193,8 @@ static size_t s_lastNITZTimeDataSize;
 #if RILC_LOG
     static char printBuf[PRINTBUF_SIZE];
 #endif
+/* store last data call data */
+static RIL_Data_Call_Response_v6 *s_last = NULL;
 
 /*******************************************************************/
 
@@ -1055,7 +1057,7 @@ dispatchImsGsmSms(Parcel &p, RequestInfo *pRI, uint8_t retry, int32_t messageRef
     rism.messageRef = messageRef;
 
     startRequest;
-    appendPrintBuf("%sformat=%d,", printBuf, rism.format);
+//    appendPrintBuf("%sformat=%d,", printBuf, rism.format);
     if (countStrings == 0) {
         // just some non-null pointer
         pStrings = (char **)alloca(sizeof(char *));
@@ -1500,7 +1502,7 @@ static void dispatchSetInitialAttachApn(Parcel &p, RequestInfo *pRI)
 
     startRequest;
     appendPrintBuf("%sapn=%s, protocol=%s, auth_type=%d, username=%s, password=%s",
-            printBuf, pf.apn, pf.protocol, pf.auth_type, pf.username, pf.password);
+            printBuf, pf.apn, pf.protocol, "", pf.username, pf.password);
     closeRequest;
     printRequest(pRI->token, pRI->pCI->requestNumber);
 
@@ -1875,6 +1877,7 @@ static int responseSMS(Parcel &p, void *response, size_t responselen) {
 
 static int responseDataCallListV4(Parcel &p, void *response, size_t responselen)
 {
+    ALOGI("guhl: responseDataCallListV4 enter");
     if (response == NULL && responselen != 0) {
         RLOGE("invalid response: NULL");
         return RIL_ERRNO_INVALID_RESPONSE;
@@ -1910,13 +1913,114 @@ static int responseDataCallListV4(Parcel &p, void *response, size_t responselen)
     return 0;
 }
 
+static int responseDataCallLastV6(int version, Parcel &p)
+{
+    if (version!=0)
+    	p.writeInt32(version);
+    p.writeInt32(1);
+    p.writeInt32(s_last->status);
+    p.writeInt32(s_last->suggestedRetryTime);
+    p.writeInt32(s_last->cid);
+    p.writeInt32(s_last->active);
+    writeStringToParcel(p, s_last->type);
+    writeStringToParcel(p, s_last->ifname);
+    writeStringToParcel(p, s_last->addresses);
+    writeStringToParcel(p, s_last->dnses);
+    writeStringToParcel(p, s_last->gateways);
+    return 0;
+}
+
+static int responseDataCallListV4asV6(Parcel &p, void *response, size_t responselen)
+{
+/*  guhl hardcoded default values for V6 */
+    int status = PDP_FAIL_NONE;
+    int suggestedRetryTime = -1;
+//    const char *dnses = "151.236.6.6 192.121.170.170";
+    const char *dnses = "8.8.8.8";
+    const char *gateways = "";
+    const char *ifname = "rmnet0";
+
+    ALOGI("guhl: responseDataCallListV4asV6 enter");
+    if (response == NULL && responselen != 0) {
+        RLOGE("invalid response: NULL");
+        return RIL_ERRNO_INVALID_RESPONSE;
+    }
+
+    if (responselen % sizeof(RIL_Data_Call_Response_v4) != 0) {
+        RLOGE("invalid response length %d expected multiple of %d",
+                (int)responselen, (int)sizeof(RIL_Data_Call_Response_v4));
+        return RIL_ERRNO_INVALID_RESPONSE;
+    }
+
+/*  hard coded: only return 1 parcel */
+    int num = responselen / sizeof(RIL_Data_Call_Response_v4);
+//    p.writeInt32(num);
+    p.writeInt32(1);
+    RIL_Data_Call_Response_v4 *p_cur = (RIL_Data_Call_Response_v4 *) response;
+    startResponse;
+    int i;
+    for (i = 0; i < num; i++) {
+	if (i==0){
+		p.writeInt32(status);
+#ifndef HCRADIO
+		p.writeInt32(suggestedRetryTime);
+#endif
+		p.writeInt32(p_cur[i].cid);
+		p.writeInt32(p_cur[i].active);
+		writeStringToParcel(p, p_cur[i].type);
+		writeStringToParcel(p, ifname);
+		writeStringToParcel(p, p_cur[i].address);
+		writeStringToParcel(p, dnses);
+		writeStringToParcel(p, gateways);
+		appendPrintBuf("%s[status=%d,retry=%d,cid=%d,%s,%s,%s,%s,%s,%s],", printBuf,
+		    status,
+		    suggestedRetryTime,
+		    p_cur[i].cid,
+		    (p_cur[i].active==0)?"down":"up",
+		    (char*)p_cur[i].type,
+		    (char*)ifname,
+		    (char*)p_cur[i].address,
+		    (char*)dnses,
+		    (char*)gateways);
+/*  store the info */
+        	if (s_last==NULL) {
+			RIL_Data_Call_Response_v6 *p_last;
+			p_last = (RIL_Data_Call_Response_v6 *)calloc(1, sizeof(RIL_Data_Call_Response_v6));
+			s_last = p_last;
+		}
+		s_last->status = status;
+		s_last->suggestedRetryTime = suggestedRetryTime;
+		s_last->cid = p_cur[i].cid;
+		s_last->active = p_cur[i].active;
+		s_last->type = p_cur[i].type;
+		s_last->ifname = (char*)ifname;
+		s_last->addresses = p_cur[i].address;
+		s_last->dnses = (char*)dnses;
+		s_last->gateways = (char*)gateways;
+	}
+    }
+    removeLastChar;
+    closeResponse;
+    return 0;
+}
+
+
 static int responseDataCallList(Parcel &p, void *response, size_t responselen)
 {
+    ALOGI("ALOGI-guhl: responseDataCallList enter");
+//    ALOG("ALOG-guhl: responseDataCallList enter");
+    RLOGI("RLOGD-guhl: responseDataCallList enter");
+
     // Write version
     p.writeInt32(s_callbacks.version);
 
     if (s_callbacks.version < 5) {
-        return responseDataCallListV4(p, response, responselen);
+	if (s_last != NULL && s_last->active == 2) {
+		return responseDataCallLastV6(0, p);
+	} else {
+		return responseDataCallListV4asV6(p, response, responselen);
+	}
+//        return responseDataCallListV4(p, response, responselen);
     } else {
         if (response == NULL && responselen != 0) {
             RLOGE("invalid response: NULL");
@@ -1967,8 +2071,15 @@ static int responseDataCallList(Parcel &p, void *response, size_t responselen)
 
 static int responseSetupDataCall(Parcel &p, void *response, size_t responselen)
 {
+    ALOGD("guhl: responseSetupDataCall enter");
     if (s_callbacks.version < 5) {
-        return responseStringsWithVersion(s_callbacks.version, p, response, responselen);
+//        return responseDataCallList(p, response, responselen);
+//        return responseStringsWithVersion(s_callbacks.version, p, response, responselen);
+	if (s_last != NULL && s_last->active == 2) {
+		return responseDataCallLastV6(s_callbacks.version, p);
+	} else {
+		return responseDataCallList(p, response, responselen);
+	}
     } else {
         return responseDataCallList(p, response, responselen);
     }
